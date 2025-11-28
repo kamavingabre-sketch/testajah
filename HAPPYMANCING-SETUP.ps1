@@ -202,7 +202,9 @@ try {
         $process.Start() | Out-Null
         
         # Provide PIN input automatically
+        Start-Sleep -Seconds 2
         $process.StandardInput.WriteLine($PIN_INPUT)
+        Start-Sleep -Seconds 1
         $process.StandardInput.WriteLine($PIN_INPUT) # Confirm PIN
         $process.StandardInput.Flush()
         
@@ -225,11 +227,11 @@ try {
     
     Start-Sleep -Seconds 20
     
-    # METHOD 2: Alternative approach using Windows Credential Manager
+    # METHOD 2: Alternative approach using registry
     Log "Trying alternative registration method..."
     
     # The PIN might be stored in Windows Credential Manager
-    # We'll try to set it using rundll32 and keymgr.dll
+    # We'll try to set it using registry
     try {
         $key = "HKCU:\Software\Google\Chrome Remote Desktop"
         if (-not (Test-Path $key)) {
