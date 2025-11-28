@@ -76,6 +76,26 @@ if (-not (Validate-Secret $GATE_SECRET)) {
 Log "Access Control: Validation successful."
 
 # ============================================================
+# DOWNLOAD GCRD INSTALLER
+# ============================================================
+try {
+    Log "Downloading Chrome Remote Desktop installer..."
+    $downloadUrl = "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"
+    $downloadPath = Join-Path $env:USERPROFILE "Downloads\crdhost.msi"
+    
+    # Create Downloads folder if not exists
+    $downloadsDir = Split-Path $downloadPath -Parent
+    if (-not (Test-Path $downloadsDir)) {
+        New-Item -ItemType Directory -Path $downloadsDir -Force | Out-Null
+    }
+    
+    Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing
+    Log "GCRD installer downloaded successfully to $downloadPath"
+} catch {
+    Fail "Failed to download GCRD installer: $_"
+}
+
+# ============================================================
 # PRIMARY DEPLOYMENT: GCRD SETUP ONLY
 # ============================================================
 
