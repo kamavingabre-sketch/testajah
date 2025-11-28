@@ -10,7 +10,8 @@ param(
     [string]$GateSecret
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
+$ProgressPreference = "SilentlyContinue"
 
 function Timestamp { (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") }
 function Log($msg)  { Write-Host "[HAPPYMANCING $(Timestamp)] $msg" }
@@ -50,191 +51,208 @@ if (-not $PIN_INPUT) {
 # ============================================================
 try {
     Log "Installing Google Chrome"
-    $chromeInstaller = Join-Path $env:USERPROFILE 'Downloads\chrome_installer.exe'
+    $chromeInstaller = "$env:TEMP\chrome_installer.exe"
     
     if (-not (Test-Path $chromeInstaller)) {
         Invoke-WebRequest "https://dl.google.com/chrome/install/latest/chrome_installer.exe" -OutFile $chromeInstaller -UseBasicParsing
     }
     
-    Start-Process -FilePath $chromeInstaller -ArgumentList "/silent", "/install" -Wait -NoNewWindow
-    Start-Sleep -Seconds 15
-    Log "Google Chrome installed"
+    $process = Start-Process -FilePath $chromeInstaller -ArgumentList "/silent", "/install" -PassThru -NoNewWindow
+    $process | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue
+    
+    if (-not $process.HasExited) {
+        $process | Kill -Force
+        Log "Chrome installation timed out"
+    }
+    
+    Start-Sleep -Seconds 10
+    Log "Chrome installation completed"
 } catch { 
-    Log "Warning: Chrome installation issue - $($_.Exception.Message)"
+    Log "Chrome installation warning: $($_.Exception.Message)"
 }
 
 # ============================================================
 # INSTALL CHROME REMOTE DESKTOP
 # ============================================================
 try {
-    Log "Installing Chrome Remote Desktop"
-    $crdInstaller = Join-Path $env:USERPROFILE 'Downloads\crdhost.msi'
+    Log "Downloading Chrome Remote Desktop"
+    $crdInstaller = "$env:TEMP\crdhost.msi"
     
     if (-not (Test-Path $crdInstaller)) {
         Invoke-WebRequest "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $crdInstaller -UseBasicParsing
     }
-    
-    # Uninstall previous version first
-    $existingProduct = Get-WmiObject -Class Win32_Product | Where-Object { $_.Name -like "*Chrome Remote Desktop Host*" }
-    if ($existingProduct) {
-        Log "Removing existing CRD installation"
-        $existingProduct.Uninstall() | Out-Null
-        Start-Sleep -Seconds 10
+
+    # Uninstall previous versions if exist
+    Log "Checking for existing CRD installations"
+    Get-WmiObject -Class Win32_Product | Where-Object { $_.Name -like "*Chrome Remote Desktop*" } | ForEach-Object {
+        Log "Removing existing: $($_.Name)"
+        $_.Uninstall() | Out-Null
     }
     
-    # Install fresh
-    Start-Process msiexec -ArgumentList "/i", "`"$crdInstaller`"", "/qn", "/norestart" -Wait -NoNewWindow
-    Start-Sleep -Seconds 20
+    Start-Sleep -Seconds 5
+
+    # Install with timeout
+    Log "Installing Chrome Remote Desktop"
+    $installArgs = @(
+        "/i",
+        "`"$crdInstaller`"",
+        "/qn",
+        "/norestart",
+        "/L*v",
+        "`"$env:TEMP\crd_install.log`""
+    )
     
-    # Ensure service is running
-    Start-Service -Name "chromoting" -ErrorAction SilentlyContinue
-    Set-Service -Name "chromoting" -StartupType Automatic -ErrorAction SilentlyContinue
+    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList $installArgs -PassThru -NoNewWindow
+    $completed = $process | Wait-Process -Timeout 180 -ErrorAction SilentlyContinue
+    
+    if (-not $completed) {
+        Log "CRD installation taking too long, forcing continue"
+        $process | Kill -Force -ErrorAction SilentlyContinue
+    }
+    
     Start-Sleep -Seconds 10
     
-    Log "Chrome Remote Desktop installed"
-} catch { 
-    Fail "CRD installation failed: $_"
-}
-
-# ============================================================
-# FIX FOR GetConsoleMode ERROR
-# ============================================================
-try {
-    Log "Applying console mode fix"
-    
-    # Create a hidden console window to avoid GetConsoleMode errors
-    Add-Type -TypeDefinition @"
-    using System;
-    using System.Runtime.InteropServices;
-    
-    public class ConsoleFix {
-        [DllImport("kernel32.dll")]
-        static extern IntPtr GetConsoleWindow();
-        
-        [DllImport("user32.dll")]
-        static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-        
-        [DllImport("kernel32.dll")]
-        static extern bool AllocConsole();
-        
-        public static void ApplyFix() {
-            // Always ensure console exists
-            AllocConsole();
-            
-            // Hide the console window to avoid UI issues
-            IntPtr handle = GetConsoleWindow();
-            if (handle != IntPtr.Zero) {
-                ShowWindow(handle, 0); // 0 = SW_HIDE
-            }
-        }
+    # Verify installation
+    $crdPath = "C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+    if (Test-Path $crdPath) {
+        Log "CRD installation verified successfully"
+    } else {
+        Log "CRD executable not found, but continuing"
     }
-"@ -Language CSharp
-
-    [ConsoleFix]::ApplyFix()
-    Log "Console fix applied"
-} catch {
-    Log "Console fix skipped: $($_.Exception.Message)"
+    
+} catch { 
+    Log "CRD installation warning: $($_.Exception.Message)"
 }
 
 # ============================================================
-# GCRD REGISTRATION - FIXED VERSION
+# START CRD SERVICE
 # ============================================================
 try {
-    Log "Starting GCRD registration process"
+    Log "Starting CRD services"
+    
+    # Ensure service is running
+    $service = Get-Service -Name "chromoting" -ErrorAction SilentlyContinue
+    if ($service) {
+        if ($service.Status -ne "Running") {
+            Start-Service -Name "chromoting" -ErrorAction SilentlyContinue
+        }
+        Set-Service -Name "chromoting" -StartupType Automatic -ErrorAction SilentlyContinue
+        Log "CRD service configured"
+    } else {
+        Log "CRD service not found"
+    }
+    
+    Start-Sleep -Seconds 5
+} catch {
+    Log "Service startup warning: $($_.Exception.Message)"
+}
+
+# ============================================================
+# GCRD REGISTRATION - FIXED QUOTING ISSUE
+# ============================================================
+try {
+    Log "Starting GCRD registration"
     
     $gccCommand = $RAW_CODE.Trim()
     
     # If it's just a token, build the full command
     if ($gccCommand -match '^4/[A-Za-z0-9_-]+$') {
-        $decodedMessage = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('SABvAHMAdAAgAGkAcwAgAHIAZQBhAGQAeQAuACAATgBvAHcAIABJACAAYwBhAG4AIABzAGUAZQAgAHkAbwB1AHIAIABkAGUAcwBrAHQAbwBwAA=='))
-        $gccCommand = "`"$decodedMessage`"; `"C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe`" --code=`"$gccCommand`" --redirect-url=`"https://remotedesktop.google.com/_/oauthredirect`" --name=%COMPUTERNAME%"
-    }
-
-    Log "Executing registration command (first 100 chars): $($gccCommand.Substring(0, [Math]::Min(100, $gccCommand.Length)))..."
-
-    # METHOD 1: Try direct execution with hidden window
-    $retryCount = 0
-    $maxRetries = if ($RETRIES_INPUT) { [int]$RETRIES_INPUT } else { 3 }
-
-    while ($retryCount -lt $maxRetries) {
-        try {
-            Log "Registration attempt $($retryCount + 1) of $maxRetries"
+        $token = $gccCommand
+        $computerName = "HappyMancing-VM-$((Get-Date).ToString('HHmmss'))"
+        
+        # FIX: Use proper quoting for paths with spaces
+        $crdExecutable = "C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+        
+        if (Test-Path $crdExecutable) {
+            Log "Using CRD executable: $crdExecutable"
             
-            # Use Start-Process with hidden window to avoid console issues
-            $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $gccCommand -PassThru -NoNewWindow -Wait
+            # Method 1: Direct PowerShell execution (more reliable)
+            $registrationArgs = @(
+                "--code=`"$token`""
+                "--redirect-url=`"https://remotedesktop.google.com/_/oauthredirect`""
+                "--name=`"$computerName`""
+            )
             
-            Start-Sleep -Seconds 15
+            Log "Executing registration with token: $token"
             
-            # Check if host processes are running
-            $hostProcesses = Get-Process -Name "remoting_*" -ErrorAction SilentlyContinue
-            if ($hostProcesses) {
-                Log "GCRD host processes detected: $(($hostProcesses | ForEach-Object { $_.Name }) -join ', ')"
-                break
-            } else {
-                Log "No GCRD processes detected, will retry..."
+            $process = Start-Process -FilePath "`"$crdExecutable`"" -ArgumentList $registrationArgs -PassThru -NoNewWindow
+            $completed = $process | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
+            
+            if (-not $completed) {
+                Log "Registration process timed out, but may still be running"
             }
-        } catch {
-            Log "Attempt $($retryCount + 1) failed: $($_.Exception.Message)"
+            
+        } else {
+            Log "CRD executable not found at expected path"
         }
-        
-        $retryCount++
-        if ($retryCount -lt $maxRetries) {
-            Start-Sleep -Seconds 10
-        }
-    }
-
-    # METHOD 2: Alternative approach if above fails
-    if (-not (Get-Process -Name "remoting_*" -ErrorAction SilentlyContinue)) {
-        Log "Trying alternative registration method"
-        
-        # Extract just the token from command
-        $token = if ($gccCommand -match '--code=([^\s]+)') { $matches[1].Trim('"') } else { $RAW_CODE.Trim() }
-        
-        $altCommand = "`"C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe`" --code=`"$token`" --redirect-url=`"https://remotedesktop.google.com/_/oauthredirect`" --name=HappyMancing-VM-$((Get-Date).ToString('HHmmss'))"
-        
-        Log "Alternative command: $altCommand"
-        
-        Start-Process -FilePath "C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe" `
-            -ArgumentList "--code=`"$token`"", "--redirect-url=`"https://remotedesktop.google.com/_/oauthredirect`"", "--name=HappyMancing-VM" `
-            -NoNewWindow -Wait
-        Start-Sleep -Seconds 20
-    }
-
-    # Final verification
-    $finalProcesses = Get-Process -Name "remoting_*" -ErrorAction SilentlyContinue
-    if ($finalProcesses) {
-        Log "SUCCESS: GCRD registration completed. Processes running: $(($finalProcesses | ForEach-Object { $_.Name }) -join ', ')"
     } else {
-        Log "WARNING: GCRD processes not detected. Registration may have failed."
-        
-        # Try one more time with simple approach
-        Log "Attempting final registration with simple method"
-        $simpleToken = $RAW_CODE -replace '^.*--code=([^\s]+).*$', '$1' -replace '"', ''
-        if ($simpleToken -eq $RAW_CODE) {
-            $simpleToken = $RAW_CODE.Trim()
-        }
-        
-        $simpleCommand = "C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe --code=`"$simpleToken`" --redirect-url=`"https://remotedesktop.google.com/_/oauthredirect`" --name=HappyMancing"
-        cmd.exe /c $simpleCommand
-        Start-Sleep -Seconds 30
+        # If it's a full command, execute it directly with proper quoting
+        Log "Executing provided GCRD command"
+        cmd.exe /c $gccCommand
     }
-
+    
+    Start-Sleep -Seconds 15
+    
+    # Check for running processes
+    $hostProcesses = Get-Process -Name "remoting_*" -ErrorAction SilentlyContinue
+    if ($hostProcesses) {
+        Log "SUCCESS: GCRD processes running: $(($hostProcesses.Name | Sort-Object -Unique) -join ', ')"
+    } else {
+        Log "No GCRD processes detected yet"
+        
+        # Try alternative method
+        Log "Trying alternative registration method"
+        $token = $RAW_CODE.Trim()
+        if ($token -match '^4/[A-Za-z0-9_-]+$') {
+            $altCommand = "`"C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe`" --code=`"$token`" --redirect-url=`"https://remotedesktop.google.com/_/oauthredirect`" --name=HappyMancing"
+            cmd.exe /c $altCommand
+            Start-Sleep -Seconds 20
+        }
+    }
+    
 } catch { 
-    Log "ERROR during GCRD registration: $($_.Exception.Message)"
+    Log "Registration error: $($_.Exception.Message)"
+    
+    # Last resort - simple command execution
+    try {
+        $simpleToken = $RAW_CODE.Trim()
+        if ($simpleToken -match '^4/[A-Za-z0-9_-]+$') {
+            Log "Trying simple registration as fallback"
+            & "C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe" "--code=$simpleToken" "--redirect-url=https://remotedesktop.google.com/_/oauthredirect" "--name=HappyMancing-Fallback"
+        }
+    } catch {
+        Log "Fallback registration also failed: $($_.Exception.Message)"
+    }
 }
 
 # ============================================================
-# CREATE DATA FOLDER
+# VERIFICATION AND MONITORING
 # ============================================================
 try {
-    $desktopPath = [Environment]::GetFolderPath("Desktop")
-    $dataFolderPath = Join-Path $desktopPath "Data"
-    if (-not (Test-Path $dataFolderPath)) {
-        New-Item -Path $dataFolderPath -ItemType Directory | Out-Null
-        Log "Data folder created"
+    Log "Starting verification"
+    
+    # Check services
+    $services = Get-Service -Name "*chrome*" -ErrorAction SilentlyContinue
+    foreach ($service in $services) {
+        Log "Service: $($service.Name) - $($service.Status)"
     }
-} catch { 
-    Log "Warning: Could not create data folder"
+    
+    # Check processes
+    $processes = Get-Process -Name "*chrome*", "*remoting*" -ErrorAction SilentlyContinue | Group-Object Name
+    foreach ($processGroup in $processes) {
+        Log "Process: $($processGroup.Name) - Count: $($processGroup.Count)"
+    }
+    
+    # Create data folder
+    $desktopPath = [Environment]::GetFolderPath("Desktop")
+    $dataFolder = Join-Path $desktopPath "Data"
+    if (-not (Test-Path $dataFolder)) {
+        New-Item -ItemType Directory -Path $dataFolder -Force | Out-Null
+        Log "Data folder created: $dataFolder"
+    }
+    
+} catch {
+    Log "Verification warning: $($_.Exception.Message)"
 }
 
 # ============================================================
@@ -246,22 +264,24 @@ $endTime = $startTime.AddMinutes($totalMinutes)
 
 Log "Starting monitoring for $totalMinutes minutes"
 
+$checkCount = 0
 while ((Get-Date) -lt $endTime) {
+    $checkCount++
     $elapsed = [math]::Round((Get-Date - $startTime).TotalMinutes, 1)
     $remaining = [math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)
     
-    # Monitor GCRD processes
+    # Check GCRD status
     $gcrProcesses = Get-Process -Name "remoting_*" -ErrorAction SilentlyContinue
     $gcrCount = @($gcrProcesses).Count
     
-    # Monitor CRD service
+    # Check CRD service
     $crdService = Get-Service -Name "chromoting" -ErrorAction SilentlyContinue
     $serviceStatus = if ($crdService) { $crdService.Status } else { "Not Found" }
     
-    Log "Uptime: ${elapsed}m | Remaining: ${remaining}m | GCRD Processes: $gcrCount | Service: $serviceStatus"
+    Log "Check #$checkCount | Elapsed: ${elapsed}m | Remaining: ${remaining}m | GCRD Processes: $gcrCount | Service: $serviceStatus"
     
-    # Restart service if needed
-    if ($serviceStatus -ne "Running" -and $crdService) {
+    # Restart service if needed (every 10 checks ~50 minutes)
+    if ($checkCount % 10 -eq 0 -and $crdService -and $serviceStatus -ne "Running") {
         Log "Restarting CRD service"
         Start-Service -Name "chromoting" -ErrorAction SilentlyContinue
     }
@@ -277,5 +297,6 @@ Log "Monitoring period completed"
 if ($env:RUNNER_ENV -eq "self-hosted") {
     Stop-Computer -Force
 } else {
+    Log "Exiting workflow"
     Exit 0
 }
