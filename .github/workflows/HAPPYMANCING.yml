@@ -1,18 +1,17 @@
-# main.yml
 name: "⚡ HappyMancing — GCRD Automation"
 
 on:
   workflow_dispatch:
     inputs:
       CODE:
-        description: "Paste token Remote Desktop ke kolom ini!"
+        description: "Full headless command or just the 4/... token from https://remotedesktop.google.com/headless (Windows)."
         required: true
       PIN:
-        description: "Buat PIN untuk Remote Desktop anda!"
+        description: "CRD PIN (6+ digits). Default 123456"
         required: false
         default: "123456"
       RETRIES:
-        description: "Percobaan untuk start-host, jangan diganti default 3 saja!"
+        description: "Retries for start-host (default 3)"
         required: false
         default: "3"
 
@@ -41,7 +40,7 @@ jobs:
         shell: pwsh
 
     steps:
-      - name: "🔧 CHECK ENV - HAPPYMANCING!"
+      - name: "🔧 Environment Summary"
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
@@ -63,45 +62,9 @@ jobs:
             exit 1
           }
           Write-Host "::add-mask::$($env:HappyMancing_Access_Token)"
-          Write-Host "🔐 Gate secret present: yes"
+          Write-Host "🔐 Access token present: yes"
 
-          try {
-            $userDownloads = Join-Path $env:USERPROFILE 'Downloads'
-            if (-not (Test-Path $userDownloads)) { New-Item -ItemType Directory -Path $userDownloads | Out-Null }
-
-            $retries = 3
-            if ($env:RETRIES_INPUT) { try { $retries = [int]$env:RETRIES_INPUT } catch {} }
-            $dlAttempts = [Math]::Max(3, $retries)
-
-            $assets = @(
-              @{ Url = "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"; Name = "crdhost.msi" },
-              @{ Url = "https://dl.google.com/chrome/install/latest/chrome_installer.exe"; Name = "chrome_installer.exe" }
-            )
-
-            function Download-Quiet([string]$Url,[string]$OutFile,[int]$Attempts) {
-              for ($i=1; $i -le $Attempts; $i++) {
-                try {
-                  Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -TimeoutSec 120
-                  if ((Test-Path -LiteralPath $OutFile) -and ((Get-Item $OutFile).Length -gt 0)) { return }
-                  throw "Downloaded file missing or zero-size."
-                } catch {
-                  if ($i -eq $Attempts) { throw }
-                  Start-Sleep -Seconds ([int][Math]::Min(20, ($i * 2)))
-                }
-              }
-            }
-
-            foreach ($a in $assets) {
-              $dest = Join-Path $userDownloads $a.Name
-              Download-Quiet -Url $a.Url -OutFile $dest -Attempts $dlAttempts
-            }
-
-            Write-Host "📁 Save location: $userDownloads"
-          } catch {
-            Write-Error "❌ Preload failed: $($_.Exception.Message)"
-          }
-
-      - name: "🌟 LOADING SETUP - HAPPYMANCING!"
+      - name: "🌟 HappyMancing Setup & Execution"
         id: setup
         run: |
           $ErrorActionPreference = 'Stop'
@@ -113,16 +76,13 @@ jobs:
             Invoke-WebRequest -Uri $url -OutFile "HappyMancing-GCRD-Instance.ps1" -UseBasicParsing -TimeoutSec 120
 
             powershell.exe -ExecutionPolicy Bypass -File ".\HappyMancing-GCRD-Instance.ps1" `
-              -Code       ($env:RAW_CODE) `
-              -Pin        ($env:PIN_INPUT) `
-              -Retries    ($env:RETRIES_INPUT) `
               -GateSecret ($env:HappyMancing_Access_Token)
               
             Write-Host "==============================================="
-            Write-Host "🪄 HappyMancing Windows 10"
-            Write-Host "🪄 Powered by: LISTEN2KAEL"
+            Write-Host "🪄 HappyMancing Windows 10 Basic"
+            Write-Host "🪄 Simple and Effective GCRD Deployment"
             Write-Host "==============================================="
           } catch {
-            Write-Error "⚠️ HappyMancing execution error: $($_.Exception.Message)"
+            Write-Error "⚠️ HappyMancing-GCRD-Instance.ps1 execution error: $($_.Exception.Message)"
             exit 1
           }
