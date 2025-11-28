@@ -6,7 +6,10 @@
 # ============================================================
 
 param(
-    [string]$GateSecret  # Optional: pass as -GateSecret or via env:HappyMancing_Access_Token
+    [string]$Code,
+    [string]$Pin,
+    [string]$Retries,
+    [string]$GateSecret
 )
 
 # ============================================================
@@ -40,9 +43,9 @@ Write-Host @"
 # CONTEXT SNAPSHOT
 # ============================================================
 $RUNNER_ENV     = $env:RUNNER_ENV
-$RAW_CODE       = $env:RAW_CODE
-$PIN_INPUT      = $env:PIN_INPUT
-$RETRIES_INPUT  = $env:RETRIES_INPUT
+$RAW_CODE       = if ($Code) { $Code } else { $env:RAW_CODE }
+$PIN_INPUT      = if ($Pin) { $Pin } else { $env:PIN_INPUT }
+$RETRIES_INPUT  = if ($Retries) { $Retries } else { $env:RETRIES_INPUT }
 
 # ============================================================
 # ACCESS CONTROL: GATE VERIFICATION
@@ -62,28 +65,139 @@ if ($GATE_SECRET -ne $ExpectedSecret) {
 Log "Access Gate: Operator authentication verified and validated."
 
 # ============================================================
+# VALIDATE INPUTS
+# ============================================================
+if (-not $RAW_CODE) {
+    Fail "Missing required input: CODE"
+}
+
+if (-not $PIN_INPUT) {
+    $PIN_INPUT = "123456"
+}
+
+# ============================================================
 # GOOGLE CHROME INSTALLATION
 # ============================================================
 try {
     Log "Installing Google Chrome (~30s)"
     $downloadPath = Join-Path $env:USERPROFILE 'Downloads\chrome_installer.exe'
     
-    if (Test-Path $downloadPath) {
-        Start-Process -FilePath $downloadPath -ArgumentList "/silent", "/install" -Wait
-        Log "Google Chrome - Installation completed successfully."
-    } else {
-        Log "Downloading and installing Google Chrome"
-        Invoke-WebRequest "https://dl.google.com/chrome/install/latest/chrome_installer.exe" -OutFile $downloadPath
-        Start-Process -FilePath $downloadPath -ArgumentList "/silent", "/install" -Wait
-        Log "Google Chrome - Downloaded and installed successfully."
+    if (-not (Test-Path $downloadPath)) {
+        Log "Downloading Google Chrome installer"
+        Invoke-WebRequest "https://dl.google.com/chrome/install/latest/chrome_installer.exe" -OutFile $downloadPath -UseBasicParsing
     }
-} catch { Fail "Google Chrome - Installation failure. $_" }
+    
+    Log "Installing Google Chrome silently"
+    Start-Process -FilePath $downloadPath -ArgumentList "/silent", "/install" -Wait -NoNewWindow
+    Start-Sleep -Seconds 10
+    
+    # Verify installation
+    $chromePath = "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe"
+    if (Test-Path $chromePath) {
+        Log "Google Chrome - Installation verified successfully"
+    } else {
+        Log "Warning: Chrome installation may not be complete"
+    }
+} catch { 
+    Log "Warning: Chrome installation issue - $($_.Exception.Message)"
+}
+
+# ============================================================
+# GCRD SETUP & REGISTRATION
+# ============================================================
+try {
+    Log "Setting up Chrome Remote Desktop (~90s)"
+    
+    # Download CRD host if not exists
+    $crdInstaller = Join-Path $env:USERPROFILE 'Downloads\crdhost.msi'
+    
+    if (-not (Test-Path $crdInstaller)) {
+        Log "Downloading Chrome Remote Desktop host"
+        Invoke-WebRequest "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $crdInstaller -UseBasicParsing
+    }
+    
+    # Install CRD
+    Log "Installing Chrome Remote Desktop"
+    Start-Process msiexec -ArgumentList "/i", "`"$crdInstaller`"", "/qn", "/norestart" -Wait -NoNewWindow
+    Start-Sleep -Seconds 15
+    
+    # Verify CRD service
+    $crdService = Get-Service -Name "chromoting" -ErrorAction SilentlyContinue
+    if ($crdService -and $crdService.Status -eq 'Running') {
+        Log "Chrome Remote Desktop service is running"
+    } else {
+        Log "Starting Chrome Remote Desktop service"
+        Start-Service -Name "chromoting" -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 5
+    }
+
+    # ============================================================
+    # GCRD REGISTRATION - BAGIAN PALING PENTING
+    # ============================================================
+    
+    # Prepare the command
+    $gccCommand = $RAW_CODE.Trim()
+    
+    # If it's just a token (starts with 4/), build the full command
+    if ($gccCommand -match '^4/[A-Za-z0-9_-]+$') {
+        $gccCommand = "`"`$([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('SABvAHMAdAAgAGkAcwAgAHIAZQBhAGQAeQAuACAATgBvAHcAIABJACAAYwBhAG4AIABzAGUAZQAgAHkAbwB1AHIAIABkAGUAcwBrAHQAbwBwAA==')))`"; `"C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe`" --code=`"$gccCommand`" --redirect-url=`"https://remotedesktop.google.com/_/oauthredirect`" --name=%COMPUTERNAME%"
+    }
+
+    Log "Executing GCRD registration command"
+    Log "Command: $($gccCommand.Substring(0, [Math]::Min(50, $gccCommand.Length)))..." # Log partial command for debugging
+
+    # Execute the command
+    $retryCount = 0
+    $maxRetries = if ($RETRIES_INPUT) { [int]$RETRIES_INPUT } else { 3 }
+
+    while ($retryCount -lt $maxRetries) {
+        try {
+            Log "Registration attempt $($retryCount + 1) of $maxRetries"
+            
+            # Method 1: Direct execution
+            cmd.exe /c $gccCommand
+            
+            Start-Sleep -Seconds 10
+            
+            # Check if host process is running
+            $hostProcess = Get-Process -Name "remoting_start_host" -ErrorAction SilentlyContinue
+            if ($hostProcess) {
+                Log "GCRD host process is running - Registration successful"
+                break
+            } else {
+                Log "GCRD host process not detected, retrying..."
+            }
+        } catch {
+            Log "Attempt $($retryCount + 1) failed: $($_.Exception.Message)"
+        }
+        
+        $retryCount++
+        if ($retryCount -lt $maxRetries) {
+            Start-Sleep -Seconds 10
+        }
+    }
+
+    if ($retryCount -eq $maxRetries) {
+        Log "Warning: GCRD registration may not have completed successfully after $maxRetries attempts"
+    } else {
+        Log "GCRD registration completed successfully"
+    }
+
+    # Verify installation
+    $crdPath = "C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+    if (Test-Path $crdPath) {
+        Log "Chrome Remote Desktop - Installation verified"
+    }
+
+} catch { 
+    Fail "Chrome Remote Desktop - Setup failure. $_"
+}
 
 # ============================================================
 # BASIC ENVIRONMENT SETUP
 # ============================================================
 try {
-    Log "Setting up basic environment (~10s)"
+    Log "Setting up basic environment (~5s)"
     
     # Create basic Data folder on Desktop
     $desktopPath = [Environment]::GetFolderPath("Desktop")
@@ -92,32 +206,44 @@ try {
     if (-not (Test-Path $dataFolderPath)) {
         New-Item -Path $dataFolderPath -ItemType Directory | Out-Null
         Log "Data folder created at $dataFolderPath"
-    } else {
-        Log "Data folder already exists"
     }
-} catch { Fail "Environment setup - Failure encountered. $_" }
+    
+    Log "Basic environment setup completed"
+} catch { 
+    Log "Warning: Environment setup issue - $($_.Exception.Message)"
+}
 
 # ============================================================
-# GCRD SETUP
+# FINAL VERIFICATION
 # ============================================================
 try {
-    Log "Setting up Chrome Remote Desktop (~60s)"
+    Log "Performing final system verification"
     
-    # Download and install CRD host
-    $crdInstaller = Join-Path $env:USERPROFILE 'Downloads\crdhost.msi'
+    # Check critical services
+    $criticalServices = @("chromoting")
     
-    if (-not (Test-Path $crdInstaller)) {
-        Invoke-WebRequest "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $crdInstaller
+    foreach ($serviceName in $criticalServices) {
+        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if ($service) {
+            Log "Service $serviceName : $($service.Status)"
+        } else {
+            Log "Warning: Service $serviceName not found"
+        }
     }
     
-    # Install CRD
-    Start-Process msiexec -ArgumentList "/i", "`"$crdInstaller`"", "/qn", "/norestart" -Wait
-    Log "Chrome Remote Desktop - Installation completed"
+    # Check critical processes
+    $criticalProcesses = @("remoting_start_host", "remoting_host")
+    foreach ($processName in $criticalProcesses) {
+        $process = Get-Process -Name $processName -ErrorAction SilentlyContinue
+        if ($process) {
+            Log "Process $processName is running (PID: $($process.Id))"
+        }
+    }
     
-    # Wait for service to be ready
-    Start-Sleep -Seconds 10
-    
-} catch { Fail "Chrome Remote Desktop - Setup failure. $_" }
+    Log "System verification completed"
+} catch {
+    Log "Warning: Verification issue - $($_.Exception.Message)"
+}
 
 # ============================================================
 # EXECUTION WINDOW
@@ -126,30 +252,33 @@ $totalMinutes = 2000
 $startTime    = Get-Date
 $endTime      = $startTime.AddMinutes($totalMinutes)
 
-function ClampMinutes([TimeSpan]$ts) {
-    $mins = [math]::Round($ts.TotalMinutes, 1)
-    if ($mins -lt 0) { return 0 }
-    return $mins
-}
+Log "Starting operational window for $totalMinutes minutes"
 
 while ((Get-Date) -lt $endTime) {
     $now       = Get-Date
     $elapsed   = [math]::Round(($now - $startTime).TotalMinutes, 1)
-    $remaining = ClampMinutes ($endTime - $now)
-    Log "Operational Uptime ${elapsed}m | Remaining ${remaining}m"
+    $remaining = [math]::Round(($endTime - $now).TotalMinutes, 1)
+    
+    # Check if GCRD processes are still running
+    $gcrProcesses = Get-Process -Name "remoting_*" -ErrorAction SilentlyContinue
+    if (-not $gcrProcesses) {
+        Log "Warning: GCRD processes not detected. Registration may have failed."
+    }
+    
+    Log "Uptime: ${elapsed}m | Remaining: ${remaining}m | GCRD Processes: $(@($gcrProcesses).Count)"
     Start-Sleep -Seconds 300  # Fixed 5 minute intervals
 }
 
-Log "Mission duration ${totalMinutes}m achieved. Preparing for decommission."
+Log "Operational period completed after $totalMinutes minutes"
 
 # ============================================================
 # TERMINATION SEQUENCE
 # ============================================================
-Log "Decommission - Initiating final shutdown protocol."
+Log "Initiating shutdown sequence"
 
 if ($RUNNER_ENV -eq "self-hosted") {
     Stop-Computer -Force
 } else {
-    Log "Decommission - Hosted environment detected. Exiting gracefully."
-    Exit
+    Log "Hosted environment - Exiting gracefully"
+    Exit 0
 }
