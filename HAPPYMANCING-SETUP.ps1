@@ -162,112 +162,151 @@ try {
     Log "Downloading Chrome Remote Desktop..."
     Download-File -Url $crdMsiUrl -OutputPath $crdMsiPath -RetryCount 3
     
-    # Download Brave Browser
-    $braveUrl = "https://laptop-updates.brave.com/latest/winx64"
-    $bravePath = Join-Path $downloadsPath "BraveBrowserSetup.exe"
-    
-    Log "Downloading Brave Browser..."
-    Download-File -Url $braveUrl -OutputPath $bravePath -RetryCount 3
-    
     Log "All essential files downloaded successfully"
 } catch {
     Fail "Pre-download phase failed: $_"
 }
 
 # ============================================================
-# PRIMARY DEPLOYMENT: CORE SYSTEMS
-# Each phase is a tactical operation.
+# INSTALL BRAVE BROWSER WITH TIMEOUT
+# Using a more reliable installation method
 # ============================================================
-
 try {
-    Log "Phase Browser-Core - Installing Brave Browser (~40s)"
+    Log "Phase Browser-Core - Installing Brave Browser"
+    
+    # Download Brave directly in this step
+    $braveUrl = "https://laptop-updates.brave.com/latest/winx64"
+    $bravePath = Join-Path $downloadsPath "BraveBrowserSetup.exe"
+    
+    Log "Downloading Brave Browser..."
+    Download-File -Url $braveUrl -OutputPath $bravePath -RetryCount 3
+    
     if (Test-Path $bravePath) {
-        Log "Starting Brave Browser installation..."
-        $process = Start-Process -FilePath $bravePath -ArgumentList "--silent", "--install" -Wait -PassThru -NoNewWindow
-        if ($process.ExitCode -eq 0) {
-            Log "Phase Browser-Core - Brave installed successfully."
+        Log "Starting Brave Browser installation (timeout: 120 seconds)..."
+        
+        # Use Start-Job for timeout control
+        $installJob = Start-Job -ScriptBlock {
+            param($BravePath)
+            $process = Start-Process -FilePath $BravePath -ArgumentList "--silent" -Wait -PassThru
+            return $process.ExitCode
+        } -ArgumentList $bravePath
+        
+        # Wait for job with timeout
+        if ($installJob | Wait-Job -Timeout 120) {
+            $exitCode = Receive-Job $installJob
+            Remove-Job $installJob
+            
+            if ($exitCode -eq 0) {
+                Log "Phase Browser-Core - Brave installed successfully."
+            } else {
+                Log "Warning: Brave installation completed with exit code: $exitCode"
+            }
         } else {
-            throw "Brave installation failed with exit code: $($process.ExitCode)"
+            # Timeout occurred
+            Log "Warning: Brave installation timeout after 120 seconds, forcing continuation..."
+            $installJob | Stop-Job -Force
+            Remove-Job $installJob -Force
+            Log "Brave installation skipped due to timeout, continuing with GCRD..."
         }
     } else {
-        throw "Brave installer not found at $bravePath"
+        Log "Warning: Brave installer not found, skipping browser installation"
     }
 } catch { 
     Log "Warning: Brave installation had issues but continuing: $_" 
 }
 
+# ============================================================
+# INSTALL CHROME REMOTE DESKTOP
+# ============================================================
 try {
-    Log "Phase GCRD - Remote desktop setup (~120s)"
+    Log "Phase GCRD - Remote desktop setup"
     if (Test-Path $crdMsiPath) {
         Log "Installing Chrome Remote Desktop Host..."
         
-        # Install Chrome Remote Desktop Host using msiexec
-        $process = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", "`"$crdMsiPath`"", "/qn", "/norestart" -Wait -PassThru
+        # Install Chrome Remote Desktop Host using msiexec with timeout
+        $installJob = Start-Job -ScriptBlock {
+            param($CrdMsiPath)
+            $process = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", "`"$CrdMsiPath`"", "/qn", "/norestart" -Wait -PassThru
+            return $process.ExitCode
+        } -ArgumentList $crdMsiPath
         
-        if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) {
-            Log "Chrome Remote Desktop Host installed successfully (Exit code: $($process.ExitCode))"
+        # Wait for job with timeout
+        if ($installJob | Wait-Job -Timeout 180) {
+            $exitCode = Receive-Job $installJob
+            Remove-Job $installJob
             
-            # Wait for service to be registered
-            Log "Waiting for services to initialize..."
-            Start-Sleep -Seconds 15
-            
-            # Register Chrome Remote Desktop with provided credentials
-            if (-not [string]::IsNullOrWhiteSpace($RAW_CODE)) {
-                Log "Registering Chrome Remote Desktop host..."
+            if ($exitCode -eq 0 -or $exitCode -eq 3010) {
+                Log "Chrome Remote Desktop Host installed successfully (Exit code: $exitCode)"
                 
-                # Set the PIN if provided
-                if (-not [string]::IsNullOrWhiteSpace($PIN_INPUT)) {
-                    $pin = $PIN_INPUT
-                } else {
-                    $pin = "123456"
-                }
+                # Wait for service to be registered
+                Log "Waiting for services to initialize..."
+                Start-Sleep -Seconds 10
                 
-                # Execute registration
-                try {
-                    # Stop any existing service
-                    $service = Get-Service -Name "chromoting" -ErrorAction SilentlyContinue
-                    if ($service) {
-                        Log "Stopping existing Chrome Remote Desktop service..."
-                        Stop-Service -Name "chromoting" -Force -ErrorAction SilentlyContinue
+                # Register Chrome Remote Desktop with provided credentials
+                if (-not [string]::IsNullOrWhiteSpace($RAW_CODE)) {
+                    Log "Registering Chrome Remote Desktop host..."
+                    
+                    # Set the PIN if provided
+                    if (-not [string]::IsNullOrWhiteSpace($PIN_INPUT)) {
+                        $pin = $PIN_INPUT
+                    } else {
+                        $pin = "123456"
                     }
                     
-                    # Register the host using the provided code
-                    $crdHostPath = "${env:ProgramFiles(x86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_host"
-                    
-                    if (Test-Path $crdHostPath) {
-                        Log "Registering host with provided credentials..."
-                        
-                        # Prepare the registration command
-                        $registrationArgs = @(
-                            "--register-host"
-                            "--pin", $pin
-                            "--code", $RAW_CODE.Trim()
-                        )
-                        
-                        $regProcess = Start-Process -FilePath $crdHostPath -ArgumentList $registrationArgs -Wait -PassThru -NoNewWindow
-                        
-                        if ($regProcess.ExitCode -eq 0) {
-                            Log "Host registration completed successfully"
-                        } else {
-                            Log "Warning: Host registration completed with exit code: $($regProcess.ExitCode)"
+                    # Execute registration
+                    try {
+                        # Stop any existing service
+                        $service = Get-Service -Name "chromoting" -ErrorAction SilentlyContinue
+                        if ($service) {
+                            Log "Stopping existing Chrome Remote Desktop service..."
+                            Stop-Service -Name "chromoting" -Force -ErrorAction SilentlyContinue
+                            Start-Sleep -Seconds 3
                         }
                         
-                        # Start the service
-                        Log "Starting Chrome Remote Desktop service..."
-                        Start-Service -Name "chromoting" -ErrorAction SilentlyContinue
+                        # Register the host using the provided code
+                        $crdHostPath = "${env:ProgramFiles(x86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_host"
                         
-                    } else {
-                        Log "Warning: Chrome Remote Desktop host executable not found at expected path"
+                        if (Test-Path $crdHostPath) {
+                            Log "Registering host with provided credentials..."
+                            
+                            # Prepare the registration command
+                            $registrationArgs = @(
+                                "--register-host"
+                                "--pin", $pin
+                                "--code", $RAW_CODE.Trim()
+                            )
+                            
+                            $regProcess = Start-Process -FilePath $crdHostPath -ArgumentList $registrationArgs -Wait -PassThru -NoNewWindow
+                            
+                            if ($regProcess.ExitCode -eq 0) {
+                                Log "Host registration completed successfully"
+                            } else {
+                                Log "Warning: Host registration completed with exit code: $($regProcess.ExitCode)"
+                            }
+                            
+                            # Start the service
+                            Log "Starting Chrome Remote Desktop service..."
+                            Start-Service -Name "chromoting" -ErrorAction SilentlyContinue
+                            
+                        } else {
+                            Log "Warning: Chrome Remote Desktop host executable not found at expected path"
+                        }
+                        
+                    } catch {
+                        Log "Warning: Host registration had issues: $_"
                     }
-                    
-                } catch {
-                    Log "Warning: Host registration had issues: $_"
+                } else {
+                    Log "No registration code provided, skipping host registration"
                 }
             } else {
-                Log "No registration code provided, skipping host registration"
+                throw "MSI installation failed with exit code: $exitCode"
             }
         } else {
-            throw "MSI installation failed with exit code: $($process.ExitCode)"
+            # Timeout occurred
+            Log "Warning: Chrome Remote Desktop installation timeout after 180 seconds"
+            $installJob | Stop-Job -Force
+            Remove-Job $installJob -Force
+            throw "Installation timeout"
         }
     } else {
         throw "Chrome Remote Desktop MSI not found at $crdMsiPath"
@@ -277,21 +316,24 @@ try {
     Fail "Phase GCRD - Setup failure. $_" 
 }
 
+# ============================================================
+# SIMPLE BROWSER SETUP
+# Skip complex environment setup to avoid issues
+# ============================================================
 try {
-    Log "Phase Browser-Env - Setting up browser environment (~30s)"
-    # Create basic browser environment setup
+    Log "Phase Browser-Env - Quick setup"
     $desktopPath = [Environment]::GetFolderPath("Desktop")
     
-    # Create useful shortcuts or scripts
-    $browserScript = @"
+    # Simple batch file to start browser
+    $browserScript = @'
 @echo off
-echo HappyMancing Browser Environment
-echo Starting Brave Browser...
+echo HappyMancing - Simple Browser Launcher
+timeout /t 3 /nobreak >nul
 start brave.exe
-"@
+'@
     
-    Set-Content -Path "$desktopPath\Start_Browser.bat" -Value $browserScript
-    Log "Phase Browser-Env - Browser environment setup complete."
+    Set-Content -Path "$desktopPath\Start_Browser.bat" -Value $browserScript -Encoding ASCII
+    Log "Phase Browser-Env - Quick setup complete."
 } catch { 
     Log "Warning: Browser environment setup had minor issues: $_" 
 }
@@ -325,15 +367,29 @@ try {
     $crdService = Get-Service -Name "chromoting" -ErrorAction SilentlyContinue
     if ($crdService) {
         Log "✓ Chrome Remote Desktop service is installed"
+        # Check service status
+        Log "Service status: $($crdService.Status)"
     } else {
         Log "⚠ Chrome Remote Desktop service not found"
     }
     
-    # Check if Brave is installed
-    $bravePath = Get-Command "brave" -ErrorAction SilentlyContinue
-    if ($bravePath) {
-        Log "✓ Brave Browser is installed"
-    } else {
+    # Check if Brave is installed by looking for executable
+    $braveExePaths = @(
+        "$env:PROGRAMFILES\BraveSoftware\Brave-Browser\Application\brave.exe",
+        "${env:PROGRAMFILES(X86)}\BraveSoftware\Brave-Browser\Application\brave.exe",
+        "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\Application\brave.exe"
+    )
+    
+    $braveInstalled = $false
+    foreach ($path in $braveExePaths) {
+        if (Test-Path $path) {
+            $braveInstalled = $true
+            Log "✓ Brave Browser is installed at: $path"
+            break
+        }
+    }
+    
+    if (-not $braveInstalled) {
         Log "⚠ Brave Browser may not be fully installed"
     }
     
@@ -351,6 +407,7 @@ $startTime    = Get-Date
 $endTime      = $startTime.AddMinutes($totalMinutes)
 
 Log "System will remain active for $totalMinutes minutes ($([math]::Round($totalMinutes/60, 1)) hours)"
+Log "Starting maintenance loop..."
 
 $checkCount = 0
 while ((Get-Date) -lt $endTime) {
@@ -359,11 +416,24 @@ while ((Get-Date) -lt $endTime) {
     $elapsed   = [math]::Round(($now - $startTime).TotalMinutes, 1)
     $remaining = [math]::Round(($endTime - $now).TotalMinutes, 1)
     
-    if ($checkCount % 6 -eq 0) {  # Log every 30 minutes
-        Log "Operational - Uptime: ${elapsed}m | Remaining: ${remaining}m"
+    # Log status every 30 minutes (every 6th check)
+    if ($checkCount % 6 -eq 1) {
+        Log "System Active - Elapsed: ${elapsed}m | Remaining: ${remaining}m | Checks: $checkCount"
+        
+        # Optional: Check critical services
+        try {
+            $crdService = Get-Service -Name "chromoting" -ErrorAction SilentlyContinue
+            if ($crdService -and $crdService.Status -ne "Running") {
+                Log "Restarting Chrome Remote Desktop service..."
+                Start-Service -Name "chromoting" -ErrorAction SilentlyContinue
+            }
+        } catch {
+            # Ignore service check errors
+        }
     }
     
-    Start-Sleep -Seconds 300  # Check every 5 minutes
+    # Wait 5 minutes between checks
+    Start-Sleep -Seconds 300
 }
 
 Log "Mission duration ${totalMinutes}m achieved. Preparing for shutdown."
@@ -379,5 +449,11 @@ if ($RUNNER_ENV -eq "self-hosted") {
     Stop-Computer -Force
 } else {
     Log "GitHub-hosted environment: Exiting workflow gracefully."
+    Write-Host "==============================================="
+    Write-Host "🎉 HappyMancing Deployment Completed!"
+    Write-Host "✅ Chrome Remote Desktop: Installed"
+    Write-Host "✅ Brave Browser: Attempted Installation" 
+    Write-Host "✅ System: Ready for remote access"
+    Write-Host "==============================================="
     Exit 0
 }
