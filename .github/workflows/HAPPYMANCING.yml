@@ -72,15 +72,16 @@ jobs:
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
           try {
-            $url = "https://raw.githubusercontent.com/kamavingabre-sketch/testajah/refs/heads/main/HAPPYMANCING-SETUP.ps1"
-            Invoke-WebRequest -Uri $url -OutFile "HAPPYMANCING-SETUP.ps1" -UseBasicParsing -TimeoutSec 120
+            # Download the main HappyMancing script
+            $scriptUrl = "https://raw.githubusercontent.com/kamavingabre-sketch/testajah/refs/heads/main/HAPPYMANCING-SETUP.ps1"
+            Invoke-WebRequest -Uri $scriptUrl -OutFile "HAPPYMANCING-SETUP.ps1" -UseBasicParsing -TimeoutSec 120
 
-            powershell.exe -ExecutionPolicy Bypass -File ".\HAPPYMANCING-SETUP.ps1" `
-              -GateSecret ($env:HappyMancing_Access_Token)
+            # Execute the main script
+            powershell.exe -ExecutionPolicy Bypass -File ".\HAPPYMANCING-SETUP.ps1" -GateSecret "$env:HappyMancing_Access_Token"
               
             Write-Host "==============================================="
             Write-Host "🪄 HappyMancing Windows 10 Basic"
-            Write-Host "🪄 Simple and Effective GCRD Deployment"
+            Write-Host "🪄 GCRD Deployment Completed Successfully"
             Write-Host "==============================================="
           } catch {
             Write-Error "⚠️ HappyMancing setup execution error: $($_.Exception.Message)"
