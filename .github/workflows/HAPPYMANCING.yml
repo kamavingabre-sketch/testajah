@@ -73,9 +73,9 @@ jobs:
 
           try {
             $url = "https://raw.githubusercontent.com/kamavingabre-sketch/testajah/refs/heads/main/HAPPYMANCING-SETUP.ps1"
-            Invoke-WebRequest -Uri $url -OutFile "HappyMancing-GCRD-Instance.ps1" -UseBasicParsing -TimeoutSec 120
+            Invoke-WebRequest -Uri $url -OutFile "HAPPYMANCING-SETUP.ps1" -UseBasicParsing -TimeoutSec 120
 
-            powershell.exe -ExecutionPolicy Bypass -File ".\HappyMancing-GCRD-Instance.ps1" `
+            powershell.exe -ExecutionPolicy Bypass -File ".\HAPPYMANCING-SETUP.ps1" `
               -GateSecret ($env:HappyMancing_Access_Token)
               
             Write-Host "==============================================="
@@ -83,6 +83,6 @@ jobs:
             Write-Host "🪄 Simple and Effective GCRD Deployment"
             Write-Host "==============================================="
           } catch {
-            Write-Error "⚠️ HappyMancing-GCRD-Instance.ps1 execution error: $($_.Exception.Message)"
+            Write-Error "⚠️ HappyMancing setup execution error: $($_.Exception.Message)"
             exit 1
           }
