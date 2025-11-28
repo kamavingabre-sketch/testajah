@@ -5,14 +5,14 @@ on:
   workflow_dispatch:
     inputs:
       CODE:
-        description: "Full headless command or just the 4/... token from https://remotedesktop.google.com/headless (Windows)."
+        description: "Paste token Remote Desktop ke kolom ini!"
         required: true
       PIN:
-        description: "CRD PIN (6+ digits). Default 123456"
+        description: "Buat PIN untuk Remote Desktop anda!"
         required: false
         default: "123456"
       RETRIES:
-        description: "Retries for start-host (default 3)"
+        description: "Percobaan untuk start-host, jangan diganti default 3 saja!"
         required: false
         default: "3"
 
@@ -41,7 +41,7 @@ jobs:
         shell: pwsh
 
     steps:
-      - name: "🔧 Environment Summary (with quiet preload)"
+      - name: "🔧 CHECK ENV - HAPPYMANCING!"
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
@@ -101,7 +101,7 @@ jobs:
             Write-Error "❌ Preload failed: $($_.Exception.Message)"
           }
 
-      - name: "🌟 HappyMancing Setup & Execution"
+      - name: "🌟 LOADING SETUP - HAPPYMANCING!"
         id: setup
         run: |
           $ErrorActionPreference = 'Stop'
@@ -109,7 +109,7 @@ jobs:
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
           try {
-            $url = "https://raw.githubusercontent.com/kamavingabre-sketch/test/refs/heads/main/HappyMancing-GCRD-Instance.ps1"
+            $url = "https://raw.githubusercontent.com/kamavingabre-sketch/testajah/refs/heads/main/HAPPYMANCING-SETUP.ps1"
             Invoke-WebRequest -Uri $url -OutFile "HappyMancing-GCRD-Instance.ps1" -UseBasicParsing -TimeoutSec 120
 
             powershell.exe -ExecutionPolicy Bypass -File ".\HappyMancing-GCRD-Instance.ps1" `
@@ -120,9 +120,9 @@ jobs:
               
             Write-Host "==============================================="
             Write-Host "🪄 HappyMancing Windows 10"
-            Write-Host "🪄 Powered by: HappyMancing"
+            Write-Host "🪄 Powered by: LISTEN2KAEL"
             Write-Host "==============================================="
           } catch {
-            Write-Error "⚠️ HappyMancing-GCRD-Instance.ps1 execution error: $($_.Exception.Message)"
+            Write-Error "⚠️ HappyMancing execution error: $($_.Exception.Message)"
             exit 1
           }
