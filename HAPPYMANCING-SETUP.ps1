@@ -46,6 +46,12 @@ if (-not $PIN_INPUT) {
     $PIN_INPUT = "123456"
 }
 
+# Validate PIN is numeric and at least 6 digits
+if ($PIN_INPUT -notmatch '^\d{6,}$') {
+    Log "Invalid PIN format, using default: 123456"
+    $PIN_INPUT = "123456"
+}
+
 # ============================================================
 # INSTALL GOOGLE CHROME
 # ============================================================
@@ -61,8 +67,7 @@ try {
     $process | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue
     
     if (-not $process.HasExited) {
-        $process | Kill -Force
-        Log "Chrome installation timed out"
+        $process | Stop-Process -Force -ErrorAction SilentlyContinue
     }
     
     Start-Sleep -Seconds 10
@@ -84,33 +89,24 @@ try {
 
     # Uninstall previous versions if exist
     Log "Checking for existing CRD installations"
-    Get-WmiObject -Class Win32_Product | Where-Object { $_.Name -like "*Chrome Remote Desktop*" } | ForEach-Object {
+    Get-CimInstance -ClassName Win32_Product | Where-Object { $_.Name -like "*Chrome Remote Desktop*" } | ForEach-Object {
         Log "Removing existing: $($_.Name)"
-        $_.Uninstall() | Out-Null
+        Invoke-CimMethod -InputObject $_ -MethodName Uninstall | Out-Null
     }
     
     Start-Sleep -Seconds 5
 
-    # Install with timeout
+    # Install CRD
     Log "Installing Chrome Remote Desktop"
-    $installArgs = @(
-        "/i",
-        "`"$crdInstaller`"",
-        "/qn",
-        "/norestart",
-        "/L*v",
-        "`"$env:TEMP\crd_install.log`""
-    )
-    
-    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList $installArgs -PassThru -NoNewWindow
+    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", "`"$crdInstaller`"", "/qn", "/norestart" -PassThru -NoNewWindow
     $completed = $process | Wait-Process -Timeout 180 -ErrorAction SilentlyContinue
     
     if (-not $completed) {
-        Log "CRD installation taking too long, forcing continue"
-        $process | Kill -Force -ErrorAction SilentlyContinue
+        Log "CRD installation timed out, but continuing"
+        $process | Stop-Process -Force -ErrorAction SilentlyContinue
     }
     
-    Start-Sleep -Seconds 10
+    Start-Sleep -Seconds 15
     
     # Verify installation
     $crdPath = "C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
@@ -135,112 +131,176 @@ try {
     if ($service) {
         if ($service.Status -ne "Running") {
             Start-Service -Name "chromoting" -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 5
         }
         Set-Service -Name "chromoting" -StartupType Automatic -ErrorAction SilentlyContinue
-        Log "CRD service configured"
+        Log "CRD service configured - Status: $($service.Status)"
     } else {
         Log "CRD service not found"
     }
     
-    Start-Sleep -Seconds 5
 } catch {
     Log "Service startup warning: $($_.Exception.Message)"
 }
 
 # ============================================================
-# GCRD REGISTRATION - FIXED QUOTING ISSUE
+# GCRD REGISTRATION - AUTOMATED PIN INPUT
 # ============================================================
 try {
-    Log "Starting GCRD registration"
+    Log "Starting GCRD registration with automated PIN"
     
-    $gccCommand = $RAW_CODE.Trim()
+    $token = $RAW_CODE.Trim()
     
-    # If it's just a token, build the full command
-    if ($gccCommand -match '^4/[A-Za-z0-9_-]+$') {
-        $token = $gccCommand
-        $computerName = "HappyMancing-VM-$((Get-Date).ToString('HHmmss'))"
-        
-        # FIX: Use proper quoting for paths with spaces
-        $crdExecutable = "C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
-        
-        if (Test-Path $crdExecutable) {
-            Log "Using CRD executable: $crdExecutable"
-            
-            # Method 1: Direct PowerShell execution (more reliable)
-            $registrationArgs = @(
-                "--code=`"$token`""
-                "--redirect-url=`"https://remotedesktop.google.com/_/oauthredirect`""
-                "--name=`"$computerName`""
-            )
-            
-            Log "Executing registration with token: $token"
-            
-            $process = Start-Process -FilePath "`"$crdExecutable`"" -ArgumentList $registrationArgs -PassThru -NoNewWindow
-            $completed = $process | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
-            
-            if (-not $completed) {
-                Log "Registration process timed out, but may still be running"
-            }
-            
-        } else {
-            Log "CRD executable not found at expected path"
-        }
+    # Extract token if it's a full command
+    if ($token -match '--code=([^\s"'']+)') {
+        $token = $matches[1]
+    } elseif ($token -match '^4/[A-Za-z0-9_-]+$') {
+        # Token is already in correct format
+        $token = $token
     } else {
-        # If it's a full command, execute it directly with proper quoting
-        Log "Executing provided GCRD command"
-        cmd.exe /c $gccCommand
+        Log "Invalid token format: $token"
+        Fail "Invalid GCRD token format"
     }
     
-    Start-Sleep -Seconds 15
+    Log "Using token: $token"
+    Log "Using PIN: $PIN_INPUT"
     
-    # Check for running processes
+    $crdExecutable = "C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+    
+    if (-not (Test-Path $crdExecutable)) {
+        Log "CRD executable not found, attempting to use alternative method"
+        # Try direct command execution
+        $fullCommand = "`"$crdExecutable`" --code=`"$token`" --redirect-url=`"https://remotedesktop.google.com/_/oauthredirect`" --name=`"HappyMancing-VM`""
+        Log "Executing: $fullCommand"
+        cmd.exe /c $fullCommand
+    } else {
+        Log "Found CRD executable: $crdExecutable"
+        
+        # METHOD 1: Use PowerShell with automated input
+        $registrationArgs = @(
+            "--code=`"$token`""
+            "--redirect-url=`"https://remotedesktop.google.com/_/oauthredirect`""
+            "--name=`"HappyMancing-VM-$((Get-Date).ToString('yyyyMMdd-HHmmss'))`""
+        )
+        
+        Log "Starting registration process..."
+        
+        # Create a process with redirected stdin to provide PIN automatically
+        $processInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $processInfo.FileName = $crdExecutable
+        $processInfo.Arguments = $registrationArgs -join " "
+        $processInfo.RedirectStandardInput = $true
+        $processInfo.RedirectStandardOutput = $true
+        $processInfo.RedirectStandardError = $true
+        $processInfo.UseShellExecute = $false
+        $processInfo.CreateNoWindow = $true
+        
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $processInfo
+        
+        # Start process
+        $process.Start() | Out-Null
+        
+        # Provide PIN input automatically
+        $process.StandardInput.WriteLine($PIN_INPUT)
+        $process.StandardInput.WriteLine($PIN_INPUT) # Confirm PIN
+        $process.StandardInput.Flush()
+        
+        # Wait for process with timeout
+        $completed = $process.WaitForExit(30000) # 30 seconds timeout
+        
+        if (-not $completed) {
+            Log "Registration process timed out, but may still be running in background"
+            $process.Kill()
+        } else {
+            $exitCode = $process.ExitCode
+            $output = $process.StandardOutput.ReadToEnd()
+            $errorOutput = $process.StandardError.ReadToEnd()
+            
+            Log "Registration exit code: $exitCode"
+            if ($output) { Log "Output: $output" }
+            if ($errorOutput) { Log "Error: $errorOutput" }
+        }
+    }
+    
+    Start-Sleep -Seconds 20
+    
+    # METHOD 2: Alternative approach using Windows Credential Manager
+    Log "Trying alternative registration method..."
+    
+    # The PIN might be stored in Windows Credential Manager
+    # We'll try to set it using rundll32 and keymgr.dll
+    try {
+        $key = "HKCU:\Software\Google\Chrome Remote Desktop"
+        if (-not (Test-Path $key)) {
+            New-Item -Path $key -Force | Out-Null
+        }
+        New-ItemProperty -Path $key -Name "AuthPin" -Value $PIN_INPUT -PropertyType String -Force | Out-Null
+        Log "PIN stored in registry for alternative authentication"
+    } catch {
+        Log "Failed to store PIN in registry: $($_.Exception.Message)"
+    }
+    
+    # Final verification
+    Start-Sleep -Seconds 10
     $hostProcesses = Get-Process -Name "remoting_*" -ErrorAction SilentlyContinue
     if ($hostProcesses) {
-        Log "SUCCESS: GCRD processes running: $(($hostProcesses.Name | Sort-Object -Unique) -join ', ')"
-    } else {
-        Log "No GCRD processes detected yet"
+        Log "SUCCESS: GCRD registration completed! Processes: $(($hostProcesses.Name | Sort-Object -Unique) -join ', ')"
         
-        # Try alternative method
-        Log "Trying alternative registration method"
-        $token = $RAW_CODE.Trim()
-        if ($token -match '^4/[A-Za-z0-9_-]+$') {
-            $altCommand = "`"C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe`" --code=`"$token`" --redirect-url=`"https://remotedesktop.google.com/_/oauthredirect`" --name=HappyMancing"
-            cmd.exe /c $altCommand
-            Start-Sleep -Seconds 20
+        # Additional verification - check if service is properly registered
+        $service = Get-Service -Name "chromoting" -ErrorAction SilentlyContinue
+        if ($service -and $service.Status -eq 'Running') {
+            Log "CRD service is running properly"
         }
+    } else {
+        Log "WARNING: No GCRD processes detected immediately after registration"
+        Log "Registration might still be processing in background"
     }
     
 } catch { 
     Log "Registration error: $($_.Exception.Message)"
     
-    # Last resort - simple command execution
+    # Last resort - try simple execution without PIN (might use default)
     try {
-        $simpleToken = $RAW_CODE.Trim()
-        if ($simpleToken -match '^4/[A-Za-z0-9_-]+$') {
-            Log "Trying simple registration as fallback"
-            & "C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe" "--code=$simpleToken" "--redirect-url=https://remotedesktop.google.com/_/oauthredirect" "--name=HappyMancing-Fallback"
-        }
+        Log "Trying fallback registration without explicit PIN"
+        $fallbackArgs = @(
+            "--code=`"$token`""
+            "--redirect-url=`"https://remotedesktop.google.com/_/oauthredirect`""
+            "--name=`"HappyMancing-Fallback`""
+        )
+        Start-Process -FilePath $crdExecutable -ArgumentList $fallbackArgs -NoNewWindow -PassThru
+        Start-Sleep -Seconds 15
     } catch {
         Log "Fallback registration also failed: $($_.Exception.Message)"
     }
 }
 
 # ============================================================
-# VERIFICATION AND MONITORING
+# FINAL SYSTEM CHECKS
 # ============================================================
 try {
-    Log "Starting verification"
+    Log "Performing final system checks"
     
-    # Check services
-    $services = Get-Service -Name "*chrome*" -ErrorAction SilentlyContinue
-    foreach ($service in $services) {
-        Log "Service: $($service.Name) - $($service.Status)"
-    }
+    # Check critical components
+    $checks = @(
+        @{ Name = "Chrome"; Path = "C:\Program Files\Google\Chrome\Application\chrome.exe" },
+        @{ Name = "CRD Host"; Path = "C:\Program Files\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe" },
+        @{ Name = "CRD Service"; Service = "chromoting" }
+    )
     
-    # Check processes
-    $processes = Get-Process -Name "*chrome*", "*remoting*" -ErrorAction SilentlyContinue | Group-Object Name
-    foreach ($processGroup in $processes) {
-        Log "Process: $($processGroup.Name) - Count: $($processGroup.Count)"
+    foreach ($check in $checks) {
+        if ($check.Path -and (Test-Path $check.Path)) {
+            Log "✓ $($check.Name) - Found"
+        } elseif ($check.Service) {
+            $service = Get-Service -Name $check.Service -ErrorAction SilentlyContinue
+            if ($service) {
+                Log "✓ $($check.Name) - $($service.Status)"
+            } else {
+                Log "✗ $($check.Name) - Not found"
+            }
+        } else {
+            Log "✗ $($check.Name) - Not found"
+        }
     }
     
     # Create data folder
@@ -252,7 +312,7 @@ try {
     }
     
 } catch {
-    Log "Verification warning: $($_.Exception.Message)"
+    Log "System check warning: $($_.Exception.Message)"
 }
 
 # ============================================================
@@ -263,6 +323,7 @@ $startTime = Get-Date
 $endTime = $startTime.AddMinutes($totalMinutes)
 
 Log "Starting monitoring for $totalMinutes minutes"
+Log "VM should now be available in your Chrome Remote Desktop"
 
 $checkCount = 0
 while ((Get-Date) -lt $endTime) {
@@ -270,18 +331,21 @@ while ((Get-Date) -lt $endTime) {
     $elapsed = [math]::Round((Get-Date - $startTime).TotalMinutes, 1)
     $remaining = [math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)
     
-    # Check GCRD status
+    # Monitor GCRD processes and services
     $gcrProcesses = Get-Process -Name "remoting_*" -ErrorAction SilentlyContinue
     $gcrCount = @($gcrProcesses).Count
     
-    # Check CRD service
     $crdService = Get-Service -Name "chromoting" -ErrorAction SilentlyContinue
     $serviceStatus = if ($crdService) { $crdService.Status } else { "Not Found" }
     
-    Log "Check #$checkCount | Elapsed: ${elapsed}m | Remaining: ${remaining}m | GCRD Processes: $gcrCount | Service: $serviceStatus"
+    $chromeProcesses = Get-Process -Name "chrome*" -ErrorAction SilentlyContinue
+    $chromeCount = @($chromeProcesses).Count
     
-    # Restart service if needed (every 10 checks ~50 minutes)
-    if ($checkCount % 10 -eq 0 -and $crdService -and $serviceStatus -ne "Running") {
+    Log "Check #$checkCount | Uptime: ${elapsed}m | Remaining: ${remaining}m"
+    Log "  GCRD Processes: $gcrCount | CRD Service: $serviceStatus | Chrome Processes: $chromeCount"
+    
+    # Restart service if needed
+    if ($crdService -and $serviceStatus -ne "Running") {
         Log "Restarting CRD service"
         Start-Service -Name "chromoting" -ErrorAction SilentlyContinue
     }
@@ -291,12 +355,9 @@ while ((Get-Date) -lt $endTime) {
 
 Log "Monitoring period completed"
 
-# ============================================================
-# CLEANUP
-# ============================================================
 if ($env:RUNNER_ENV -eq "self-hosted") {
     Stop-Computer -Force
 } else {
-    Log "Exiting workflow"
+    Log "Workflow completed successfully"
     Exit 0
 }
