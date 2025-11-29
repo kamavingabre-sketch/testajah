@@ -64,6 +64,30 @@ jobs:
           Write-Host "::add-mask::$($env:HappyMancing_Access_Token)"
           Write-Host "🔐 Access token present: yes"
 
+      - name: "📥 Pre-download GCRD Installer"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          
+          $downloadUrl = "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"
+          $downloadPath = Join-Path $env:USERPROFILE "Downloads\crdhost.msi"
+          
+          # Ensure Downloads directory exists
+          $downloadsDir = Split-Path $downloadPath -Parent
+          if (-not (Test-Path $downloadsDir)) {
+              New-Item -ItemType Directory -Path $downloadsDir -Force | Out-Null
+          }
+          
+          Write-Host "Downloading GCRD installer from: $downloadUrl"
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing
+          
+          if (Test-Path $downloadPath) {
+              Write-Host "✅ GCRD installer downloaded successfully: $downloadPath"
+          } else {
+              Write-Error "❌ GCRD installer download failed"
+              exit 1
+          }
+
       - name: "🎣 HappyMancing GCRD Setup & Execution"
         id: setup
         run: |
